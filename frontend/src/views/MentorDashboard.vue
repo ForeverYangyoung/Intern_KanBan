@@ -9,7 +9,7 @@
       </div>
       <div class="board-subtitle">
         <span style="font-size:12px;color:#86909c">
-          常驻看板 · 红点未消不丢消息 · 数据截止: {{ reportTime }}
+          常驻看板 · 一键知晓不阻塞 · 自愿记录得绩效积分 · 数据截止: {{ reportTime }}
         </span>
         <t-button size="small" variant="outline" @click="refreshBoard" :loading="loading">
           <template #icon><t-icon name="refresh" /></template>刷新看板
@@ -26,14 +26,14 @@
       </t-radio-group>
     </div>
 
-    <!-- 🔴 待处理预警（红点 + 展开 + Copilot 小抄 + 乐观锁按钮） -->
+    <!-- 🔴 待处理预警（新工作流：一键知晓 + 自愿记录得积分） -->
     <t-card v-if="data.hotList?.length" class="hot-section-card" :bordered="true">
       <template #header>
         <div class="section-header">
           <t-badge dot :count="data.hotList.length">
             <span style="font-size:15px;font-weight:600;color:#e34d59">🔴 待处理 · 崩溃卡点预警</span>
           </t-badge>
-          <span style="font-size:12px;color:#86909c">展开可查看崩溃原因与一键决策</span>
+          <span style="font-size:12px;color:#86909c">每位实习生展开后可操作</span>
         </div>
       </template>
 
@@ -52,58 +52,106 @@
                 {{ item.alert?.level === 'RED' ? '红灯' : '黄灯' }}
               </t-tag>
               <t-tag size="small" variant="light">{{ item.stateLabel }}</t-tag>
-              <span style="font-size:12px;color:#86909c">{{ item.jobFamily }} · 进度 {{ item.phaseProgress }}</span>
+              <span style="font-size:12px;color:#86909c">{{ item.jobFamily }} · {{ item.phaseProgress }}</span>
               <t-tag v-if="item.recruiterTag === 'RISK'" size="small" theme="danger" variant="outline">RISK</t-tag>
+              <t-tag v-if="item.acknowledged" size="small" theme="success" variant="light">✓ 已阅</t-tag>
             </div>
           </template>
 
-          <!-- 崩溃卡点详情 + Copilot 小抄 -->
+          <!-- 崩溃卡点详情 -->
           <div class="breakdown-section">
-            <t-alert theme="error" :title="'崩溃卡点：' + (item.alert?.cheatSheet || '行为数据异常')">
+            <t-alert theme="error" :title="'系统检测到异常：' + (item.alert?.cheatSheet || '行为数据异常')">
               <template #message>
-                <div class="copilot-cheatsheet">
-                  <div class="cheatsheet-label">💡 Copilot 导航小抄：</div>
-                  <div class="cheatsheet-text">{{ item.alert?.cheatSheet || '系统检测到该实习生在关键里程碑出现滞留，建议导师线下核实具体情况。' }}</div>
+                <div class="data-context">
+                  <div class="context-label">📋 数据上下文（AI提炼，仅供参考）：</div>
+                  <div class="context-text">{{ item.alert?.cheatSheet || '该实习生当前阶段里程碑出现停滞。' }}</div>
                 </div>
               </template>
             </t-alert>
 
-            <!-- 一键决策（乐观锁） -->
-            <div class="action-buttons">
+            <!-- ==== 新工作流：三按钮 ==== -->
+            <div class="workflow-section">
+              <!-- 步骤1: [已阅，知晓] — 一键消除红点，不阻塞 -->
               <t-button
-                size="small" theme="primary"
+                v-if="!item.acknowledged"
+                size="small" theme="primary" variant="outline"
                 :disabled="item.actionSending"
-                :loading="item.actionSending"
-                @click="doAction(item, 'PUSH_DOC')">
-                <template #icon><t-icon name="file-paste" /></template>
-                推送学习资料
+                :loading="item.actionSending && item.pendingAction === 'ack'"
+                @click="acknowledge(item)">
+                <template #icon><t-icon name="check" /></template>
+                已阅，知晓 ✓
               </t-button>
+
+              <!-- 步骤2: [记录带教要点] — 自愿操作，可得绩效积分 -->
               <t-button
-                size="small" theme="warning"
-                :disabled="item.actionSending"
-                :loading="item.actionSending"
-                @click="doAction(item, 'CREATE_GROUP')">
-                <template #icon><t-icon name="usergroup-add" /></template>
-                拉企微协助群
-              </t-button>
-              <t-button
+                v-if="item.acknowledged && !item.evidenceSubmitted"
                 size="small" theme="success"
                 :disabled="item.actionSending"
-                :loading="item.actionSending"
-                @click="showEvidenceDialog(item)">
-                <template #icon><t-icon name="check" /></template>
-                已线下点拨 ✓
+                :loading="item.actionSending && item.pendingAction === 'evidence'"
+                @click="showQuickEvidence(item)">
+                <template #icon><t-icon name="edit" /></template>
+                📝 记录带教要点（+1绩效积分）
+              </t-button>
+
+              <!-- 已记录绩效素材 -->
+              <t-tag v-if="item.evidenceSubmitted" size="small" theme="success" variant="light">
+                🏆 绩效素材已写入
+              </t-tag>
+
+              <!-- 辅助操作 -->
+              <t-button
+                size="small" theme="default" variant="outline"
+                :disabled="item.actionSending"
+                @click="doAction(item, 'PUSH_DOC')">
+                <template #icon><t-icon name="file-paste" /></template>
+                推送资料
               </t-button>
               <t-button
-                size="small" variant="outline"
+                size="small" theme="default" variant="outline"
                 :disabled="item.actionSending"
-                @click="askProgress(item)">
-                <template #icon><t-icon name="chat-message" /></template>
-                问进度
+                @click="doAction(item, 'CREATE_GROUP')">
+                <template #icon><t-icon name="usergroup-add" /></template>
+                拉群
               </t-button>
             </div>
 
-            <!-- 乐观锁版本提示 -->
+            <!-- 绩效积分预览牌 -->
+            <div v-if="item.acknowledged && !item.evidenceSubmitted" class="incentive-banner">
+              <div class="incentive-icon">🏆</div>
+              <div class="incentive-text">
+                <strong>记录带教要点，即可获得绩效积分</strong>
+                <p style="margin:2px 0 0;font-size:12px;color:#86909c">
+                  用一句话记录本次点拨核心，AI 将自动润色为"组织建设贡献描述"，
+                  直接写入你的年终绩效素材库——让带教成为你的加分项，而非负担。
+                </p>
+              </div>
+            </div>
+
+            <!-- 快速记录弹窗（内嵌，非强制阻断） -->
+            <div v-if="item.showEvidenceInput" class="inline-evidence">
+              <t-textarea
+                v-model="item.evidenceText"
+                placeholder="一句话记录带教核心（可选）"
+                :autosize="{ minRows: 2, maxRows: 3 }"
+                style="margin-bottom:8px"
+              />
+              <div class="evidence-actions">
+                <t-button size="small" theme="success" :disabled="!item.evidenceText?.trim()"
+                  @click="submitEvidence(item)">
+                  💾 提交记录（得积分）
+                </t-button>
+                <t-button size="small" variant="text" theme="default"
+                  @click="item.showEvidenceInput = false">
+                  跳过
+                </t-button>
+              </div>
+              <div v-if="item.performanceSummary" class="perf-result">
+                <div class="perf-label">🏆 AI润色后的绩效素材：</div>
+                <div class="perf-text">{{ item.performanceSummary }}</div>
+              </div>
+            </div>
+
+            <!-- 操作反馈 -->
             <div v-if="item.actionResult" class="action-result">
               <t-tag :theme="item.actionSuccess ? 'success' : 'danger'" size="small">
                 {{ item.actionResult }}
@@ -114,18 +162,13 @@
       </t-collapse>
     </t-card>
 
-    <!-- 🟢 正常区（折叠，无红点） -->
+    <!-- 🟢 正常区 -->
     <t-card v-if="data.coldList?.length" :bordered="true">
       <template #header>
         <span style="font-size:15px;font-weight:600;color:#00A870">🟢 正常推进 · {{ data.coldList.length }} 人</span>
       </template>
-
       <t-collapse :default-value="[]">
-        <t-collapse-panel
-          v-for="item in data.coldList"
-          :key="item.id"
-          :value="item.id"
-        >
+        <t-collapse-panel v-for="item in data.coldList" :key="item.id" :value="item.id">
           <template #header>
             <div class="cold-header">
               <span style="font-weight:600">{{ item.name }}</span>
@@ -146,33 +189,9 @@
       </t-collapse>
     </t-card>
 
-    <!-- 空状态 -->
     <t-card v-if="!data.hotList?.length && !data.coldList?.length" :bordered="true" class="empty-card">
       <div class="empty-hint">选择上方导师查看带教实习生</div>
     </t-card>
-
-    <!-- 举证式消红点弹窗（绩效利益捆绑） -->
-    <t-dialog
-      v-model:visible="evidenceDialog.visible"
-      header="📝 举证式消红点 · 绩效素材生成"
-      :confirm-btn="{ content: '提交并消除红点', disabled: !evidenceDialog.content.trim() }"
-      :on-confirm="submitEvidence"
-      width="560px"
-    >
-      <div style="padding: 8px 0; font-size: 13px; line-height: 1.8; color: #666; margin-bottom: 16px">
-        <p>⚠️ <strong>不可空点消红点</strong> — 请输入本次点拨核心内容</p>
-        <p style="margin-top: 4px">混元将把您的带教内容转写为 <strong>「组织建设贡献描述」</strong>，可直接用于年终绩效/晋升材料 🏆</p>
-      </div>
-      <t-textarea
-        v-model="evidenceDialog.content"
-        placeholder="例：指出了 Redis 连接池 maxIdle 配置问题，并带着看了团队标准示例，实习生已理解并修复"
-        :autosize="{ minRows: 3, maxRows: 6 }"
-      />
-      <div v-if="evidenceDialog.performanceSummary" style="margin-top: 16px; padding: 12px; background: #f0f5ff; border-radius: 6px; border-left: 3px solid #0052d9">
-        <div style="font-size: 12px; color: #0052d9; font-weight: 600; margin-bottom: 6px">🏆 混元生成的组织建设贡献描述（已写入绩效素材库）</div>
-        <div style="font-size: 13px; line-height: 1.7; color: #333; white-space: pre-wrap">{{ evidenceDialog.performanceSummary }}</div>
-      </div>
-    </t-dialog>
   </div>
 </template>
 
@@ -187,18 +206,10 @@ const expandedAlerts = ref([])
 const loading = ref(false)
 const reportTime = ref('')
 
-// 举证式消红点弹窗状态
-const evidenceDialog = ref({
-  visible: false,
-  content: '',
-  performanceSummary: '',
-  currentItem: null,
-})
-
 const mentors = ref([
-  { id: 1, name: '陈导师', pendingCount: 0 },
-  { id: 2, name: '何导师', pendingCount: 0 },
-  { id: 3, name: '齐导师', pendingCount: 0 },
+  { id: 1, name: '王建国', pendingCount: 0 },
+  { id: 2, name: '李思琪', pendingCount: 0 },
+  { id: 3, name: '张伟明', pendingCount: 0 },
 ])
 
 onMounted(() => loadBoard())
@@ -210,18 +221,21 @@ async function loadBoard() {
     data.value = result || { hotList: [], coldList: [] }
     reportTime.value = new Date().toLocaleString('zh-CN')
 
-    // 更新导师红点计数
     const m = mentors.value.find(x => x.id === selectedMentorId.value)
     if (m) m.pendingCount = data.value.hotList?.length || 0
 
-    // 自动展开所有待处理项
     expandedAlerts.value = (data.value.hotList || []).map(i => i.id)
 
-    // 初始化每个热项的操作状态
     for (const item of data.value.hotList || []) {
       item.actionSending = false
       item.actionResult = ''
       item.actionSuccess = false
+      item.pendingAction = ''
+      item.acknowledged = false
+      item.evidenceSubmitted = false
+      item.showEvidenceInput = false
+      item.evidenceText = ''
+      item.performanceSummary = ''
     }
   } catch (e) {
     console.error(e)
@@ -231,8 +245,76 @@ async function loadBoard() {
   }
 }
 
+// ===== 新工作流：一键知晓（不阻塞） =====
+async function acknowledge(item) {
+  item.pendingAction = 'ack'
+  item.actionSending = true
+  try {
+    await mentorApi.doAction({
+      action: 'RESOLVE',
+      intern_id: item.id,
+      alert_id: item.alert?.id || null,
+      expected_version: item.alert?.version || 1,
+    })
+    item.acknowledged = true
+    item.actionSuccess = true
+    item.actionResult = '✓ 已阅知晓，红点消除'
+
+    const m = mentors.value.find(x => x.id === selectedMentorId.value)
+    if (m) m.pendingCount = Math.max(0, m.pendingCount - 1)
+
+    // 延迟移除热区，给用户时间看到反馈
+    setTimeout(() => {
+      data.value.hotList = data.value.hotList.filter(i => i.id !== item.id)
+    }, 1500)
+
+    Message.success('已阅知晓！可自愿记录带教要点获取绩效积分')
+  } catch (e) {
+    item.actionSuccess = false
+    item.actionResult = '操作失败，请重试'
+    Message.error('操作失败')
+  } finally {
+    item.actionSending = false
+    item.pendingAction = ''
+  }
+}
+
+// ===== 新工作流：快速记录带教要点（自愿，不强制） =====
+function showQuickEvidence(item) {
+  item.showEvidenceInput = true
+  item.evidenceText = ''
+  item.performanceSummary = ''
+}
+
+async function submitEvidence(item) {
+  const content = (item.evidenceText || '').trim()
+  if (!content) return
+  item.pendingAction = 'evidence'
+  item.actionSending = true
+  try {
+    const result = await mentorApi.resolveWithEvidence({
+      alert_id: item.alert?.id,
+      mentor_id: selectedMentorId.value,
+      evidence_type: 'TEXT',
+      evidence_content: content,
+    })
+    item.evidenceSubmitted = true
+    item.showEvidenceInput = false
+    item.performanceSummary = result.performance_summary || '绩效素材已生成'
+    item.actionSuccess = true
+    item.actionResult = '🏆 绩效素材已写入素材库'
+    Message.success('带教记录已保存，绩效积分+1 🏆')
+  } catch (e) {
+    item.actionSuccess = false
+    Message.error('提交失败：' + (e?.response?.data?.detail || e.message))
+  } finally {
+    item.actionSending = false
+    item.pendingAction = ''
+  }
+}
+
+// 辅助操作
 async function doAction(item, actionType) {
-  // 乐观锁：先标记 pending，发起请求，成功后更新
   item.actionSending = true
   item.actionResult = '正在提交...'
   try {
@@ -245,88 +327,19 @@ async function doAction(item, actionType) {
     const result = await mentorApi.doAction(payload)
     item.actionSuccess = true
     item.actionResult = result?.message || `${actionType} 已完成`
-
-    if (actionType === 'RESOLVE') {
-      // 乐观更新：从热区移除
-      data.value.hotList = data.value.hotList.filter(i => i.id !== item.id)
-      // 更新导师计数
-      const m = mentors.value.find(x => x.id === selectedMentorId.value)
-      if (m) m.pendingCount = Math.max(0, m.pendingCount - 1)
-    }
-
     Message.success(item.actionResult)
   } catch (e) {
     item.actionSuccess = false
-    const msg = e?.response?.status === 409
+    item.actionResult = e?.response?.status === 409
       ? '⚠️ 版本冲突：请刷新看板后重试'
       : '操作失败：' + (e?.message || '网络异常')
-    item.actionResult = msg
-    Message.error(msg)
+    Message.error(item.actionResult)
   } finally {
     item.actionSending = false
   }
 }
 
-async function askProgress(item) {
-  try {
-    const result = await mentorApi.askProgress(item.id)
-    Message.success(result?.message || '已发送进度问询')
-  } catch (e) {
-    Message.error('发送失败')
-  }
-}
-
 function refreshBoard() { loadBoard() }
-
-// ============================================================
-// 举证式消红点 — 绩效利益捆绑
-// ============================================================
-
-function showEvidenceDialog(item) {
-  evidenceDialog.value = {
-    visible: true,
-    content: '',
-    performanceSummary: '',
-    currentItem: item,
-  }
-}
-
-async function submitEvidence() {
-  const item = evidenceDialog.value.currentItem
-  if (!item) return
-
-  const content = evidenceDialog.value.content.trim()
-  if (!content) {
-    Message.warning('请输入带教核心内容')
-    return
-  }
-
-  // 乐观锁：先标记 pending
-  item.actionSending = true
-  try {
-    const result = await mentorApi.resolveWithEvidence({
-      alert_id: item.alert?.id,
-      mentor_id: selectedMentorId.value,
-      evidence_type: 'TEXT',
-      evidence_content: content,
-    })
-
-    // 显示生成的绩效素材
-    evidenceDialog.value.performanceSummary = result.performance_summary || '绩效素材已生成'
-
-    // 乐观更新：从热区移除
-    setTimeout(() => {
-      data.value.hotList = data.value.hotList.filter(i => i.id !== item.id)
-      const m = mentors.value.find(x => x.id === selectedMentorId.value)
-      if (m) m.pendingCount = Math.max(0, m.pendingCount - 1)
-      evidenceDialog.value.visible = false
-      Message.success('红点已消除，绩效素材已写入素材库 🏆')
-    }, 2000)
-  } catch (e) {
-    item.actionSending = false
-    Message.error('提交失败：' + (e?.response?.data?.detail || e.message))
-  }
-}
 </script>
 
 <style scoped>
@@ -345,13 +358,27 @@ async function submitEvidence() {
 .cold-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 .breakdown-section { padding: 12px 4px; }
-.copilot-cheatsheet { margin-top: 4px; }
-.cheatsheet-label { font-size: 13px; color: #0052D9; font-weight: 600; }
-.cheatsheet-text { font-size: 13px; color: #49546E; margin-top: 4px; line-height: 1.7; }
+.data-context { margin-top: 4px; }
+.context-label { font-size: 13px; color: #0052D9; font-weight: 600; }
+.context-text { font-size: 13px; color: #49546E; margin-top: 4px; line-height: 1.7; }
 
-.action-buttons { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+/* ===== 新工作流 ===== */
+.workflow-section { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; align-items: center; }
+
+.incentive-banner { display: flex; gap: 12px; align-items: flex-start; margin-top: 12px;
+  padding: 14px 16px; background: linear-gradient(135deg, #fff7e6, #fffbf0);
+  border: 1px solid #ffe7ba; border-radius: 8px; font-size: 13px; }
+.incentive-icon { font-size: 24px; flex-shrink: 0; }
+.incentive-text { flex: 1; line-height: 1.6; color: #49546e; }
+
+.inline-evidence { margin-top: 12px; padding: 12px; background: #f8fafd; border-radius: 8px; border: 1px solid #e7f0ff; }
+.evidence-actions { display: flex; gap: 8px; align-items: center; }
+
+.perf-result { margin-top: 10px; padding: 10px 12px; background: #e8f8f0; border-radius: 6px; border-left: 3px solid #00a870; }
+.perf-label { font-size: 12px; color: #00a870; font-weight: 600; margin-bottom: 4px; }
+.perf-text { font-size: 13px; line-height: 1.7; color: #333; white-space: pre-wrap; }
+
 .action-result { margin-top: 8px; }
-
 .cold-detail { padding: 8px 4px; }
 .detail-table { border-collapse: collapse; }
 .detail-table td { padding: 4px 8px; font-size: 13px; }

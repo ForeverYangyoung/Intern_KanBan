@@ -1,13 +1,19 @@
 """
-导师端 API 路由 — 冷热隔离看板 + 一键决策
+导师端 API 路由 — 冷热隔离看板 + 新工作流
+
+新工作流（祛除反人性设计）：
+1. [已阅知晓] → 一键关闭红点，不阻塞
+2. [记录带教要点] → 自愿操作，可得绩效积分
+3. 绩效素材预览 → 展示"带教能给你带来什么利益"
 """
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func as sa_func
+from datetime import datetime
 
-from app.dependencies import get_db
+from app.dependencies import get_db, ConcurrencySafeSession
 from app.models.database import (
     Intern, Mentor, GrowthMap, GrowthTask,
     MentorAlert, AlertLevel, AlertStatus, StateNode, RecruiterTag, JobFamily,
@@ -121,17 +127,19 @@ async def mentor_dashboard(mentor_id: Optional[int] = 1, db: Session = Depends(g
 
 @router.post("/action")
 async def mentor_action(req: ActionRequest, db: Session = Depends(get_db)):
-    """导师一键决策操作（v2.1 支持无预警的RISK处理）"""
-    from datetime import datetime
+    """
+    导师一键决策操作（新工作流：不阻塞，自愿记录得积分）
 
-    # 获取实习生
+    RESOLVE: 一键知晓，关闭红点（不强制填写带教内容）
+    PUSH_DOC / CREATE_GROUP: 辅助操作
+    """
     intern = db.get(Intern, req.intern_id)
     if not intern:
         raise HTTPException(status_code=404, detail="实习生不存在")
 
     if req.action == "RESOLVE":
         if req.alert_id:
-            # 有预警：关闭预警 + 乐观锁校验
+            # 关闭预警 + 乐观锁
             alert = db.get(MentorAlert, req.alert_id)
             if not alert:
                 raise HTTPException(status_code=404, detail="预警不存在")
@@ -140,15 +148,15 @@ async def mentor_action(req: ActionRequest, db: Session = Depends(get_db)):
             alert.status = AlertStatus.RESOLVED
             alert.version += 1
             alert.resolved_at = datetime.now()
-            db.commit()
-            return {"success": True, "message": f"预警已关闭，红点已消除", "new_version": alert.version}
+            ConcurrencySafeSession.safe_commit(db)
+            return {"success": True, "message": f"已阅知晓，红点已消除（可自愿记录带教要点获取绩效积分）",
+                    "new_version": alert.version}
         else:
-            # 无预警（纯RISK标签进热区）：将 RISK → STEADY，移出热区
             if intern.recruiter_tag == RecruiterTag.RISK:
                 intern.recruiter_tag = RecruiterTag.STEADY
-                db.commit()
+                ConcurrencySafeSession.safe_commit(db)
                 return {"success": True, "message": f"已确认{intern.name}状态恢复正常，移除风险标记"}
-            return {"success": True, "message": f"已确认{intern.name}线下点拨完成"}
+            return {"success": True, "message": f"已确认{intern.name}状态无异常"}
 
     elif req.action == "ASK_PROGRESS":
         return {"success": True, "message": f"已向 {intern.name} 发送进度问询消息", "internName": intern.name}
@@ -200,58 +208,47 @@ class ResolveWithEvidenceRequest(BaseModel):
 @router.post("/resolve-with-evidence")
 async def resolve_with_evidence(req: ResolveWithEvidenceRequest, db: Session = Depends(get_db)):
     """
-    举证式消红点 — 导师必须提供带教证据，混元生成绩效素材
-
-    流程：
-    1. 验证预警存在且属于该导师
-    2. 验证证据非空
-    3. 调用混元生成「组织建设贡献描述」
-    4. 写入 mentor_contribution_logs
-    5. 关闭预警
+    自愿记录带教要点 — 非强制，可得绩效积分（新工作流）
+    
+    导师选择记录时调用此接口，AI润色后写入绩效素材库
     """
-    from datetime import datetime
-
-    # 验证预警
     alert = db.get(MentorAlert, req.alert_id)
     if not alert:
         raise HTTPException(status_code=404, detail="预警不存在")
     if alert.mentor_id != req.mentor_id:
         raise HTTPException(status_code=403, detail="无权操作此预警")
-    if alert.status == AlertStatus.RESOLVED:
-        return {"success": True, "message": "预警已处理，无需重复操作"}
 
-    # 验证证据非空
     evidence = (req.evidence_content or "").strip()
     if not evidence:
-        raise HTTPException(status_code=400, detail="请提供带教证据（文字或语音转写）")
+        raise HTTPException(status_code=400, detail="请输入带教要点")
 
-    # 生成绩效素材（调用混元或模拟）
+    # 生成绩效素材（AI仅润色）
+    mentor_name = getattr(db.get(Mentor, req.mentor_id), 'name', '导师')
+    intern_name = getattr(db.get(Intern, alert.intern_id), 'name', '实习生')
     performance_summary = _generate_performance_summary(
-        mentor_name=db.get(Mentor, req.mentor_id).name if db.get(Mentor, req.mentor_id) else "导师",
-        intern_name=db.get(Intern, alert.intern_id).name if db.get(Intern, alert.intern_id) else "实习生",
-        evidence=evidence,
-        alert_level=alert.alert_level.value,
+        mentor_name=mentor_name, intern_name=intern_name,
+        evidence=evidence, alert_level=alert.alert_level.value,
     )
 
     # 写入绩效素材表
     log = MentorContributionLog(
-        mentor_id=req.mentor_id,
-        intern_id=alert.intern_id,
-        alert_id=req.alert_id,
-        raw_input=evidence,
+        mentor_id=req.mentor_id, intern_id=alert.intern_id,
+        alert_id=req.alert_id, raw_input=evidence,
         performance_summary=performance_summary,
     )
     db.add(log)
 
-    # 关闭预警
-    alert.status = AlertStatus.RESOLVED
-    alert.version += 1
-    alert.resolved_at = datetime.now()
-    db.commit()
+    # 若预警尚未关闭，一并关闭
+    if alert.status != AlertStatus.RESOLVED:
+        alert.status = AlertStatus.RESOLVED
+        alert.version += 1
+        alert.resolved_at = datetime.now()
+
+    ConcurrencySafeSession.safe_commit(db)
 
     return {
         "success": True,
-        "message": "红点已消除，绩效素材已生成",
+        "message": "带教记录已保存，绩效素材已写入素材库 🏆",
         "performance_summary": performance_summary,
         "alert_id": req.alert_id,
     }

@@ -1,12 +1,16 @@
 """
 里程碑状态机引擎 — 核心资产
-实现事件驱动的状态流转：ONBOARDING → RAMP_UP → INDEPENDENT
+实现事件驱动的 DAG 状态流转：ONBOARDING → RAMP_UP → INDEPENDENT
+
+核心原则：
+1. 事件触发制，非时间推进制
+2. 所有判断由纯数据规则驱动，AI 不参与决策
+3. DAG 前置边：前驱阶段全部完成才能进入下一阶段
 """
-import json
-from datetime import date
-from typing import Dict, Optional, Tuple
+from datetime import date, datetime
+from typing import Dict, Optional, List
 from sqlalchemy.orm import Session
-from sqlalchemy import select, func
+from sqlalchemy import select
 
 from app.models.database import (
     Intern, MilestoneConfig, RDSnapshot, SalesSnapshot,
@@ -14,91 +18,207 @@ from app.models.database import (
     AlertLevel, AlertStatus
 )
 
+# ============================================================
+# 岗位 DAG 拓扑定义
+# ============================================================
+STATE_ORDER = [StateNode.ONBOARDING, StateNode.RAMP_UP, StateNode.INDEPENDENT]
+
+JOB_DAG = {
+    JobFamily.RD: {
+        StateNode.ONBOARDING: {
+            "name": "融入期 — 环境配置与规范",
+            "milestones": [
+                {"id": "rd_onb_1", "name": "开发环境配置完成", "trigger": "DEV_ENV_SETUP_DONE",
+                 "rule": {"field": "commit_count", "op": "gt", "value": 0}, "required": 1},
+                {"id": "rd_onb_2", "name": "通过基础代码规范考核", "trigger": "CODE_STANDARD_PASSED",
+                 "rule": {"field": "cr_total_comments", "op": "gt", "value": 0}, "required": 1},
+            ]
+        },
+        StateNode.RAMP_UP: {
+            "name": "上手期 — Bug修复与PR合入",
+            "milestones": [
+                {"id": "rd_ramp_1", "name": "独立修复首个线上Bug", "trigger": "FIRST_BUG_RESOLVED",
+                 "rule": {"field": "bug_resolved_count", "op": "gt", "value": 0}, "required": 1},
+                {"id": "rd_ramp_2", "name": "合入首个小需求PR", "trigger": "FIRST_PR_MERGED",
+                 "rule": {"field": "pr_merged_count", "op": "gt", "value": 0}, "required": 1},
+            ]
+        },
+        StateNode.INDEPENDENT: {
+            "name": "独立期 — 模块Owner与交付保障",
+            "milestones": [
+                {"id": "rd_ind_1", "name": "独立Owner核心业务模块", "trigger": "MODULE_OWNERSHIP_ASSIGNED",
+                 "rule": {"field": "pr_merged_count", "op": "gte", "value": 3}, "required": 1},
+                {"id": "rd_ind_2", "name": "TAPD需求交付准时率达标(连续3周)", "trigger": "DELIVERY_ON_TIME_3_WEEKS",
+                 "rule": {"field": "bug_resolved_count", "op": "gte", "value": 5}, "required": 1},
+            ]
+        },
+    },
+    JobFamily.PM: {
+        StateNode.ONBOARDING: {
+            "name": "融入期 — 产品认知与思维培养",
+            "milestones": [
+                {"id": "pm_onb_1", "name": "阅读产品引导文档", "trigger": "GUIDE_DOC_READ", "rule": None, "required": 1},
+                {"id": "pm_onb_2", "name": "完成竞品分析思维导图", "trigger": "COMPETITOR_ANALYSIS_DONE", "rule": None, "required": 1},
+            ]
+        },
+        StateNode.RAMP_UP: {
+            "name": "上手期 — 需求分析与文档输出",
+            "milestones": [
+                {"id": "pm_ramp_1", "name": "输出首份完整PRD并通过评审", "trigger": "FIRST_PRD_APPROVED", "rule": None, "required": 1},
+            ]
+        },
+        StateNode.INDEPENDENT: {
+            "name": "独立期 — 需求池管理与版本规划",
+            "milestones": [
+                {"id": "pm_ind_1", "name": "主导核心版本迭代需求池规划", "trigger": "REQUIREMENT_POOL_OWNERSHIP", "rule": None, "required": 1},
+            ]
+        },
+    },
+    JobFamily.SALES: {
+        StateNode.ONBOARDING: {
+            "name": "融入期 — 话术与系统培训",
+            "milestones": [
+                {"id": "sales_onb_1", "name": "销售话术通关", "trigger": "SALES_SCRIPT_PASSED",
+                 "rule": {"field": "effective_call_duration", "op": "gt", "value": 0}, "required": 1},
+                {"id": "sales_onb_2", "name": "熟悉CRM系统操作", "trigger": "CRM_SYSTEM_FAMILIAR",
+                 "rule": {"field": "crm_leads_touched", "op": "gt", "value": 0}, "required": 1},
+            ]
+        },
+        StateNode.RAMP_UP: {
+            "name": "上手期 — 独立外呼与客户沉淀",
+            "milestones": [
+                {"id": "sales_ramp_1", "name": "独立外呼并沉淀有效意向客户", "trigger": "CRM_FIRST_CALL",
+                 "rule": {"field": "crm_leads_touched", "op": "gte", "value": 3}, "required": 1},
+            ]
+        },
+        StateNode.INDEPENDENT: {
+            "name": "独立期 — 全链路商务谈判",
+            "milestones": [
+                {"id": "sales_ind_1", "name": "独立完成全链路商务谈判", "trigger": "FULL_DEAL_CLOSED",
+                 "rule": {"field": "crm_leads_touched", "op": "gte", "value": 10}, "required": 1},
+            ]
+        },
+    }
+}
+
+# ============================================================
+# 纯数据规则引擎
+# ============================================================
+def evaluate_rule(snapshot, rule: dict) -> bool:
+    if not rule or not snapshot:
+        return False
+    field_val = getattr(snapshot, rule["field"], 0) or 0
+    op, val = rule["op"], rule["value"]
+    if op == "gt": return field_val > val
+    if op == "gte": return field_val >= val
+    if op == "lt": return field_val < val
+    if op == "lte": return field_val <= val
+    if op == "eq": return field_val == val
+    return False
+
+def evaluate_milestone(snapshots: list, milestone: dict) -> bool:
+    rule = milestone.get("rule")
+    if not rule:
+        return True
+    count = sum(1 for s in snapshots if evaluate_rule(s, rule))
+    return count >= milestone.get("required", 1)
+
 
 class StateMachine:
-    """
-    岗位标准里程碑状态机
-    摒弃时间推进制，改为事件触发制
-    """
+    """DAG 状态机 — 纯数据驱动"""
 
     def __init__(self, db: Session):
         self.db = db
 
-    def process_rd_event(self, intern_id: int, event_type: str,
-                          event_data: Optional[Dict] = None) -> Dict:
-        """
-        处理研发线事件
-        event_type: DEV_ENV_SETUP_DONE / CODE_STANDARD_PASSED /
-                    FIRST_BUG_RESOLVED / FIRST_PR_MERGED /
-                    MODULE_OWNERSHIP_ASSIGNED / DELIVERY_ON_TIME_3_WEEKS
-        """
-        return self._process_event(intern_id, event_type, JobFamily.RD, event_data)
+    # ===== DAG 拓扑查询 =====
+    def get_full_dag(self, job_family: JobFamily) -> dict:
+        dag = JOB_DAG.get(job_family, {})
+        states = []
+        for i, state in enumerate(STATE_ORDER):
+            node = dag.get(state, {"name": state.value, "milestones": []})
+            states.append({
+                "state": state.value, "name": node["name"], "order": i,
+                "prerequisites": [STATE_ORDER[i-1].value] if i > 0 else [],
+                "milestones": [{
+                    "id": m["id"], "name": m["name"], "trigger": m["trigger"],
+                    "rule": m.get("rule"), "required": m.get("required", 1)
+                } for m in node["milestones"]]
+            })
+        return {
+            "job_family": job_family.value, "states": states,
+            "edges": [{"from": STATE_ORDER[i-1].value, "to": STATE_ORDER[i].value}
+                      for i in range(1, len(STATE_ORDER))]
+        }
 
-    def process_pm_event(self, intern_id: int, event_type: str,
-                          event_data: Optional[Dict] = None) -> Dict:
-        """处理产品线事件"""
-        return self._process_event(intern_id, event_type, JobFamily.PM, event_data)
+    def get_current_milestone_status(self, intern_id: int) -> dict:
+        intern = self.db.get(Intern, intern_id)
+        if not intern:
+            return {"error": "实习生不存在"}
+        node = JOB_DAG.get(intern.job_family, {}).get(intern.current_state, {"name": "", "milestones": []})
+        snapshots = list(self._get_snapshots(intern_id, intern.job_family))
+        milestones_detail = []
+        completed = 0
+        for ms in node["milestones"]:
+            done = evaluate_milestone(snapshots, ms)
+            if done: completed += 1
+            milestones_detail.append({
+                "id": ms["id"], "name": ms["name"], "trigger": ms["trigger"],
+                "done": done, "rule": ms.get("rule")
+            })
+        return {
+            "intern_id": intern_id, "current_state": intern.current_state.value,
+            "stage_name": node.get("name", ""), "milestones": milestones_detail,
+            "completed": completed, "total": len(node["milestones"]),
+            "can_advance": completed >= len(node["milestones"])
+        }
 
-    def process_sales_event(self, intern_id: int, event_type: str,
-                             event_data: Optional[Dict] = None) -> Dict:
-        """处理销售线事件"""
-        return self._process_event(intern_id, event_type, JobFamily.SALES, event_data)
+    def _get_snapshots(self, intern_id: int, job_family: JobFamily):
+        if job_family == JobFamily.RD:
+            return self.db.execute(
+                select(RDSnapshot).where(RDSnapshot.intern_id == intern_id)
+                .order_by(RDSnapshot.snapshot_date)
+            ).scalars().all()
+        elif job_family == JobFamily.SALES:
+            return self.db.execute(
+                select(SalesSnapshot).where(SalesSnapshot.intern_id == intern_id)
+                .order_by(SalesSnapshot.snapshot_date)
+            ).scalars().all()
+        return []
 
-    def _process_event(self, intern_id: int, event_type: str,
-                       job_family: JobFamily,
-                       event_data: Optional[Dict] = None) -> Dict:
-        """
-        核心状态机判定逻辑
-        1. 查找当前状态
-        2. 查找当前阶段所需的所有里程碑
-        3. 判断是否满足通关条件 → 状态流转
-        """
+    # ===== 核心事件处理 =====
+    def process_rd_event(self, intern_id: int, event_type: str, event_data: dict = None) -> dict:
+        return self._process_event(intern_id, event_type, JobFamily.RD)
+
+    def process_pm_event(self, intern_id: int, event_type: str, event_data: dict = None) -> dict:
+        return self._process_event(intern_id, event_type, JobFamily.PM)
+
+    def process_sales_event(self, intern_id: int, event_type: str, event_data: dict = None) -> dict:
+        return self._process_event(intern_id, event_type, JobFamily.SALES)
+
+    def _process_event(self, intern_id: int, event_type: str, job_family: JobFamily) -> dict:
         intern = self.db.get(Intern, intern_id)
         if not intern:
             return {"success": False, "message": f"实习生 ID {intern_id} 不存在"}
 
-        current_state = intern.current_state
-        old_state = current_state
+        old_state = intern.current_state
+        node = JOB_DAG.get(job_family, {}).get(intern.current_state)
+        if not node:
+            return {"success": True, "state_changed": False, "current_state": old_state.value,
+                    "message": f"当前阶段 {old_state.value} 无DAG配置"}
 
-        # 查找当前阶段的所有里程碑配置
-        milestones = self.db.execute(
-            select(MilestoneConfig).where(
-                MilestoneConfig.job_family == job_family,
-                MilestoneConfig.state_node == current_state
-            )
-        ).scalars().all()
-
-        if not milestones:
-            return {
-                "success": True,
-                "state_changed": False,
-                "message": f"当前阶段 {current_state.value} 无里程碑配置",
-                "current_state": current_state.value
-            }
-
-        # 统计当前阶段事件完成情况
-        completed_count = self._count_completed_events(intern_id, job_family, current_state)
-
-        # 记录本次事件
-        self._log_event(intern_id, event_type, event_data)
-
-        # 重新统计
-        completed_count = self._count_completed_events(intern_id, job_family, current_state)
-        required_count = len(milestones)
+        snapshots = list(self._get_snapshots(intern_id, job_family))
+        completed = sum(1 for ms in node["milestones"] if evaluate_milestone(snapshots, ms))
+        total = len(node["milestones"])
 
         result = {
-            "success": True,
-            "state_changed": False,
-            "current_state": current_state.value,
-            "event": event_type,
-            "completed_milestones": completed_count,
-            "total_milestones": required_count,
-            "progress_percent": round(completed_count / max(required_count, 1) * 100, 1)
+            "success": True, "state_changed": False, "current_state": old_state.value,
+            "event": event_type, "completed_milestones": completed,
+            "total_milestones": total,
+            "progress_percent": round(completed / max(total, 1) * 100, 1)
         }
 
-        # 判定是否满足通关条件
-        if completed_count >= required_count:
-            next_state = self._get_next_state(current_state)
+        if completed >= total:
+            next_state = self._get_next_state(old_state)
             if next_state:
                 intern.current_state = next_state
                 self.db.commit()
@@ -106,199 +226,63 @@ class StateMachine:
                 result["old_state"] = old_state.value
                 result["current_state"] = next_state.value
                 result["message"] = f"🎉 通关！从 {old_state.value} 晋升至 {next_state.value}"
-
-                # 检查是否需要更新风控标签（绩优闪电检测）
                 self._check_lightning_promotion(intern)
             else:
-                result["message"] = f"已完成 {current_state.value} 全部里程碑，已是最终阶段"
+                result["message"] = f"已完成 {old_state.value} 全部里程碑，已是最终阶段"
         else:
-            result["message"] = (
-                f"里程碑进度: {completed_count}/{required_count}，"
-                f"尚不满足通关条件"
-            )
-
+            result["message"] = f"里程碑进度: {completed}/{total}，尚不满足通关条件"
         return result
 
     def _get_next_state(self, current: StateNode) -> Optional[StateNode]:
-        """获取下一个状态"""
-        state_order = [StateNode.ONBOARDING, StateNode.RAMP_UP, StateNode.INDEPENDENT]
         try:
-            idx = state_order.index(current)
-            if idx + 1 < len(state_order):
-                return state_order[idx + 1]
+            idx = STATE_ORDER.index(current)
+            return STATE_ORDER[idx + 1] if idx + 1 < len(STATE_ORDER) else None
         except ValueError:
-            pass
-        return None
-
-    def _count_completed_events(self, intern_id: int,
-                                 job_family: JobFamily,
-                                 state_node: StateNode) -> int:
-        """
-        根据岗位类型和当前状态，统计已完成的事件数
-        这里统计对应快照表中满足条件的数据条数
-        """
-        if job_family == JobFamily.RD:
-            # 查询研发快照表
-            if state_node == StateNode.ONBOARDING:
-                # 融入期：有commit记录 = DEV_ENV_SETUP_DONE
-                snapshots = self.db.execute(
-                    select(RDSnapshot).where(
-                        RDSnapshot.intern_id == intern_id
-                    )
-                ).scalars().all()
-                count = 0
-                for s in snapshots:
-                    if s.commit_count > 0:
-                        count += 1  # 环境配置完成
-                    if s.cr_total_comments > 0:
-                        count += 1  # 代码规范考核（简化：有CR评论即视为考核通过）
-                return min(count, 2)  # 融入期最多2个里程碑
-
-            elif state_node == StateNode.RAMP_UP:
-                snapshots = self.db.execute(
-                    select(RDSnapshot).where(
-                        RDSnapshot.intern_id == intern_id
-                    )
-                ).scalars().all()
-                count = 0
-                for s in snapshots:
-                    if s.bug_resolved_count > 0:
-                        count += 1
-                    if s.pr_merged_count > 0:
-                        count += 1
-                return min(count, 2)
-
-            elif state_node == StateNode.INDEPENDENT:
-                snapshots = self.db.execute(
-                    select(RDSnapshot).where(
-                        RDSnapshot.intern_id == intern_id
-                    )
-                ).scalars().all()
-                count = 0
-                for s in snapshots:
-                    if s.pr_merged_count >= 3:
-                        count += 1  # 独立Owner
-                    if s.bug_resolved_count >= 5:
-                        count += 1  # 交付准时率
-                return min(count, 2)
-
-        elif job_family == JobFamily.SALES:
-            snapshots = self.db.execute(
-                select(SalesSnapshot).where(
-                    SalesSnapshot.intern_id == intern_id
-                )
-            ).scalars().all()
-
-            if state_node == StateNode.ONBOARDING:
-                count = 0
-                for s in snapshots:
-                    if s.effective_call_duration > 0:
-                        count += 1  # 话术通关
-                    if s.crm_leads_touched > 0:
-                        count += 1  # CRM熟悉
-                return min(count, 2)
-
-            elif state_node == StateNode.RAMP_UP:
-                count = 0
-                for s in snapshots:
-                    if s.crm_leads_touched >= 3:
-                        count += 1
-                return min(count, 1)
-
-            elif state_node == StateNode.INDEPENDENT:
-                count = 0
-                for s in snapshots:
-                    if s.crm_leads_touched >= 10:
-                        count += 1
-                return min(count, 1)
-
-        # PM 线暂用简化逻辑
-        return 0
-
-    def _log_event(self, intern_id: int, event_type: str,
-                   event_data: Optional[Dict] = None):
-        """记录事件到对应快照表（在 process_rd_event 之前已由 webhook 写入）"""
-        # 快照写入由 webhook 路由负责，这里只做事件审计
-        pass
+            return None
 
     def _check_lightning_promotion(self, intern: Intern):
-        """
-        绩优闪电检测：
-        连续两周状态机通关速度处于同岗位前 10%
-        简化版：从 ONBOARDING → RAMP_UP 的通关时长判断
-        """
-        # 查询同岗位所有实习生的平均通关时长
-        # 简化版：如果 intern 当前是 INDEPENDENT，直接打标 LIGHTNING
         if intern.current_state == StateNode.INDEPENDENT:
             intern.recruiter_tag = RecruiterTag.LIGHTNING
             self.db.commit()
 
-    def get_intern_state(self, intern_id: int) -> Dict:
-        """查询实习生当前状态机信息"""
+    # ===== 状态查询 =====
+    def get_intern_state(self, intern_id: int) -> dict:
         intern = self.db.get(Intern, intern_id)
         if not intern:
             return {"success": False, "message": "实习生不存在"}
-
-        milestones = self.db.execute(
-            select(MilestoneConfig).where(
-                MilestoneConfig.job_family == intern.job_family,
-                MilestoneConfig.state_node == intern.current_state
-            )
-        ).scalars().all()
-
-        completed = self._count_completed_events(
-            intern_id, intern.job_family, intern.current_state
-        )
-
+        status = self.get_current_milestone_status(intern_id)
         return {
-            "intern_id": intern_id,
-            "name": intern.name,
+            "intern_id": intern_id, "name": intern.name,
             "job_family": intern.job_family.value,
             "current_state": intern.current_state.value,
             "recruiter_tag": intern.recruiter_tag.value,
-            "current_milestones": [
-                {
-                    "name": m.milestone_name,
-                    "trigger_event": m.trigger_event,
-                    "required_count": m.required_count
-                }
-                for m in milestones
-            ],
-            "completed_count": completed,
-            "total_count": len(milestones),
-            "progress_percent": round(completed / max(len(milestones), 1) * 100, 1)
+            "current_milestones": status.get("milestones", []),
+            "completed_count": status.get("completed", 0),
+            "total_count": status.get("total", 0),
+            "progress_percent": round(status.get("completed", 0) / max(status.get("total", 1), 1) * 100, 1)
         }
 
+    # ===== 预警管理 =====
     def create_alert(self, mentor_id: int, intern_id: int,
                      alert_level: AlertLevel, cheat_sheet_text: str) -> MentorAlert:
-        """创建导师预警记录"""
-        alert = MentorAlert(
-            mentor_id=mentor_id,
-            intern_id=intern_id,
-            alert_level=alert_level,
-            cheat_sheet_text=cheat_sheet_text,
-            status=AlertStatus.ACTIVE
-        )
+        alert = MentorAlert(mentor_id=mentor_id, intern_id=intern_id,
+                            alert_level=alert_level, cheat_sheet_text=cheat_sheet_text,
+                            status=AlertStatus.ACTIVE)
         self.db.add(alert)
         self.db.commit()
         self.db.refresh(alert)
         return alert
 
     def get_active_alerts(self, mentor_id: int) -> list:
-        """获取导师名下所有活跃预警"""
         alerts = self.db.execute(
-            select(MentorAlert).where(
-                MentorAlert.mentor_id == mentor_id,
-                MentorAlert.status == AlertStatus.ACTIVE
-            )
+            select(MentorAlert).where(MentorAlert.mentor_id == mentor_id,
+                                       MentorAlert.status == AlertStatus.ACTIVE)
         ).scalars().all()
-
         result = []
         for alert in alerts:
             intern = self.db.get(Intern, alert.intern_id)
             result.append({
-                "id": alert.id,
-                "intern_id": alert.intern_id,
+                "id": alert.id, "intern_id": alert.intern_id,
                 "intern_name": intern.name if intern else "未知",
                 "alert_level": alert.alert_level.value,
                 "cheat_sheet_text": alert.cheat_sheet_text,
@@ -308,62 +292,38 @@ class StateMachine:
         return result
 
     def resolve_alert(self, alert_id: int) -> bool:
-        """消除预警"""
         alert = self.db.get(MentorAlert, alert_id)
         if alert:
             alert.status = AlertStatus.RESOLVED
-            from datetime import datetime
             alert.resolved_at = datetime.now()
             self.db.commit()
             return True
         return False
 
-    def detect_risk(self, intern_id: int) -> Optional[Dict]:
-        """
-        红灯风险检测：
-        连续两周触发状态机卡点，或同一技术盲点被驳回 3 次以上
-        """
+    # ===== 纯数据风险检测 =====
+    def detect_risk(self, intern_id: int) -> Optional[dict]:
         intern = self.db.get(Intern, intern_id)
         if not intern:
             return None
 
-        # 简化版：检查当前阶段停留时间
-        # 如果融入期超过 14 天未通关，标记为风险
-        from datetime import datetime, timedelta
-        if intern.current_state == StateNode.ONBOARDING:
-            if intern.entry_date:
-                days_since_entry = (date.today() - intern.entry_date).days
-                if days_since_entry > 14:
-                    # 检查是否完成任何里程碑
-                    completed = self._count_completed_events(
-                        intern_id, intern.job_family, intern.current_state
-                    )
-                    if completed == 0:
-                        intern.recruiter_tag = RecruiterTag.RISK
-                        self.db.commit()
-                        return {
-                            "intern_id": intern_id,
-                            "risk_detected": True,
-                            "reason": f"入职 {days_since_entry} 天仍未完成任何融入期里程碑",
-                            "days_since_entry": days_since_entry
-                        }
+        if intern.current_state == StateNode.ONBOARDING and intern.entry_date:
+            days = (date.today() - intern.entry_date).days
+            if days > 14:
+                status = self.get_current_milestone_status(intern_id)
+                if status.get("completed", 0) == 0:
+                    intern.recruiter_tag = RecruiterTag.RISK
+                    self.db.commit()
+                    return {"intern_id": intern_id, "risk_detected": True,
+                            "reason": f"入职 {days} 天仍未完成任何融入期里程碑", "days_since_entry": days}
 
-        # RAMP_UP 阶段超过 21 天未通关
-        if intern.current_state == StateNode.RAMP_UP:
-            if intern.entry_date:
-                days_since_entry = (date.today() - intern.entry_date).days
-                if days_since_entry > 35:  # 2周融入 + 3周上手 = 35天
-                    completed = self._count_completed_events(
-                        intern_id, intern.job_family, intern.current_state
-                    )
-                    if completed == 0:
-                        intern.recruiter_tag = RecruiterTag.RISK
-                        self.db.commit()
-                        return {
-                            "intern_id": intern_id,
-                            "risk_detected": True,
-                            "reason": f"上手期已超过预期时长，进度严重滞后",
-                            "days_since_entry": days_since_entry
-                        }
+        if intern.current_state == StateNode.RAMP_UP and intern.entry_date:
+            days = (date.today() - intern.entry_date).days
+            if days > 35:
+                status = self.get_current_milestone_status(intern_id)
+                if status.get("completed", 0) == 0:
+                    intern.recruiter_tag = RecruiterTag.RISK
+                    self.db.commit()
+                    return {"intern_id": intern_id, "risk_detected": True,
+                            "reason": f"上手期已超时，进度严重滞后", "days_since_entry": days}
 
         return {"intern_id": intern_id, "risk_detected": False}
