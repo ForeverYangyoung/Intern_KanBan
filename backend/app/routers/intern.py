@@ -12,7 +12,7 @@ from app.dependencies import get_db
 from app.models.database import (
     Intern, CustomTask, StateNode, JobFamily,
     GrowthMap, GrowthTask, RDSnapshot, SalesSnapshot,
-    RecruiterTag, BreakdownEvent
+    RecruiterTag, BreakdownEvent, GrowthErrorBook
 )
 from app.services.state_machine import StateMachine
 
@@ -304,22 +304,26 @@ async def add_custom_task(task: CustomTaskCreate, db: Session = Depends(get_db))
 
 
 @router.put("/toggle-task/{task_id}")
-async def toggle_task(task_id: int, db: Session = Depends(get_db)):
-    """切换任务状态（勾选/取消）"""
+async def toggle_task(task_id: int, type: Optional[str] = Query("system"), db: Session = Depends(get_db)):
+    """切换任务状态（勾选/取消）。type='custom' 查 CustomTask，否则查 GrowthTask"""
+    
+    if type == "custom":
+        ct = db.get(CustomTask, task_id)
+        if not ct:
+            raise HTTPException(status_code=404, detail="自定义任务不存在")
+        new_status = "done" if ct.status != "done" else "in_progress"
+        ct.status = new_status
+        db.commit()
+        return {"success": True, "newStatus": new_status, "type": "custom"}
+
+    # 默认查 GrowthTask
     task = db.get(GrowthTask, task_id)
     if not task:
-        ct = db.get(CustomTask, task_id)
-        if ct:
-            new_status = "done" if ct.status != "done" else "in_progress"
-            ct.status = new_status
-            db.commit()
-            return {"success": True, "newStatus": new_status}
-        raise HTTPException(status_code=404, detail="任务不存在")
-
+        raise HTTPException(status_code=404, detail="系统任务不存在")
     new_status = "done" if task.status != "done" else "in_progress"
     task.status = new_status
     db.commit()
-    return {"success": True, "newStatus": new_status}
+    return {"success": True, "newStatus": new_status, "type": "system"}
 
 
 class ReverseConfirmRequest(BaseModel):

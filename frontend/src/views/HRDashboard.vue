@@ -186,7 +186,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { Message } from 'tdesign-vue-next'
+import { MessagePlugin } from 'tdesign-vue-next'
 import { hrApi, internApi } from '@/api'
 
 const data = ref({ rows: [], reportDate: '' })
@@ -265,7 +265,7 @@ function onRowClick(row) {
 
 function recordIntervention(row) {
   if (!row.diagnosis || !row.action?.trim()) {
-    Message.warning('请先填写诊断结论与行动')
+    MessagePlugin.warning('请先填写诊断结论与行动')
     return
   }
   const now = new Date().toLocaleString('zh-CN')
@@ -276,7 +276,7 @@ function recordIntervention(row) {
       diagnosisLabel: diagnosisLabelMap[row.diagnosis] || row.diagnosis,
     }
   }
-  Message.success('已记录于 HR 决策流（数据库），进入风控闭环')
+  MessagePlugin.success('已记录于 HR 决策流（数据库），进入风控闭环')
 
   // 自动关闭面板
   expandedRisks.value = expandedRisks.value.filter(id => id !== row.id)
@@ -288,7 +288,7 @@ function sendLetterToMentor(row) {
     title: `已发信给导师（${row.mentorName}）`,
     content: `信函内容：您好 ${row.mentorName}，您带教的 ${row.name}（${row.jobLabel}）已连续两周触发红灯风险，HR 已介入评估。请本周内与 HRBP 同步辅导策略。`,
   }
-  Message.success('已通过企微发出导师一封信')
+  MessagePlugin.success('已通过企微发出导师一封信')
 }
 
 function scheduleInterview(row) {
@@ -313,7 +313,7 @@ function issueOffer(row) {
     title: `已发放 Stage-1 转正意向 — ${row.name}`,
     content: `恭喜！${row.name} 已触发绩优闪电规则（前 10% + CR 评语正面率达标），已发放 Stage-1 转正意向书，后续流程由招聘直接接管。`,
   }
-  Message.success('Stage-1 转正意向已发出，招聘接管后续流程')
+  MessagePlugin.success('Stage-1 转正意向已发出，招聘接管后续流程')
 }
 </script>
 

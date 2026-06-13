@@ -34,9 +34,9 @@ export const internApi = {
     return api.post('/intern/custom-task', data).then(r => r.data)
   },
 
-  /** 切换任务完成状态 */
-  toggleTask(taskId) {
-    return api.put(`/intern/toggle-task/${taskId}`).then(r => r.data)
+  /** 切换任务完成状态 (taskType: 'system' | 'custom') */
+  toggleTask(taskId, taskType = 'system') {
+    return api.put(`/intern/toggle-task/${taskId}`, null, { params: { type: taskType } }).then(r => r.data)
   },
 
   /** 销售反向确认提交（§13.3 补丁二） */

@@ -136,6 +136,14 @@
                 style="margin-bottom:8px"
               />
               <div class="evidence-actions">
+                <!-- 语音输入（模拟 ASR） -->
+                <t-button size="small" variant="outline" theme="warning"
+                  :disabled="item.voiceRecording"
+                  :loading="item.voiceRecording"
+                  @click="simulateVoice(item)">
+                  <template #icon>🎤</template>
+                  {{ item.voiceRecording ? '识别中...' : '语音输入' }}
+                </t-button>
                 <t-button size="small" theme="success" :disabled="!item.evidenceText?.trim()"
                   @click="submitEvidence(item)">
                   💾 提交记录（得积分）
@@ -197,7 +205,7 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { Message } from 'tdesign-vue-next'
+import { MessagePlugin } from 'tdesign-vue-next'
 import { mentorApi } from '@/api'
 
 const data = ref({ hotList: [], coldList: [] })
@@ -268,11 +276,11 @@ async function acknowledge(item) {
       data.value.hotList = data.value.hotList.filter(i => i.id !== item.id)
     }, 1500)
 
-    Message.success('已阅知晓！可自愿记录带教要点获取绩效积分')
+    MessagePlugin.success('已阅知晓！可自愿记录带教要点获取绩效积分')
   } catch (e) {
     item.actionSuccess = false
     item.actionResult = '操作失败，请重试'
-    Message.error('操作失败')
+    MessagePlugin.error('操作失败')
   } finally {
     item.actionSending = false
     item.pendingAction = ''
@@ -284,6 +292,16 @@ function showQuickEvidence(item) {
   item.showEvidenceInput = true
   item.evidenceText = ''
   item.performanceSummary = ''
+  item.voiceRecording = false
+}
+
+// 模拟语音识别：点击后 1.5s 假装 ASR 转写，自动填入一段带教内容
+async function simulateVoice(item) {
+  item.voiceRecording = true
+  await new Promise(r => setTimeout(r, 1500))
+  item.voiceRecording = false
+  item.evidenceText = '针对 ' + item.name + ' 当前' + (item.alert?.level === 'RED' ? '严重' : '') + '卡点问题，已线下 1v1 辅导，指出了问题根因并给出改进方案，实习生已理解并承诺本周内完成修复。'
+  MessagePlugin.success('🎤 语音识别完成，可修改后提交')
 }
 
 async function submitEvidence(item) {
@@ -303,10 +321,10 @@ async function submitEvidence(item) {
     item.performanceSummary = result.performance_summary || '绩效素材已生成'
     item.actionSuccess = true
     item.actionResult = '🏆 绩效素材已写入素材库'
-    Message.success('带教记录已保存，绩效积分+1 🏆')
+    MessagePlugin.success('带教记录已保存，绩效积分+1 🏆')
   } catch (e) {
     item.actionSuccess = false
-    Message.error('提交失败：' + (e?.response?.data?.detail || e.message))
+    MessagePlugin.error('提交失败：' + (e?.response?.data?.detail || e.message))
   } finally {
     item.actionSending = false
     item.pendingAction = ''
@@ -327,13 +345,13 @@ async function doAction(item, actionType) {
     const result = await mentorApi.doAction(payload)
     item.actionSuccess = true
     item.actionResult = result?.message || `${actionType} 已完成`
-    Message.success(item.actionResult)
+    MessagePlugin.success(item.actionResult)
   } catch (e) {
     item.actionSuccess = false
     item.actionResult = e?.response?.status === 409
       ? '⚠️ 版本冲突：请刷新看板后重试'
       : '操作失败：' + (e?.message || '网络异常')
-    Message.error(item.actionResult)
+    MessagePlugin.error(item.actionResult)
   } finally {
     item.actionSending = false
   }

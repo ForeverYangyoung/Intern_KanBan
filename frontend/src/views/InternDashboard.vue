@@ -43,7 +43,7 @@
       <div class="col">
         <t-card title="待办任务" :bordered="true">
           <div v-if="!currentTasks.length" style="text-align:center;padding:32px;color:#bbb">暂无待办任务</div>
-          <div v-for="t in currentTasks" :key="t.id" class="task-item" :class="{ done: t.status === 'done' }" @click="onToggle(t)">
+          <div v-for="t in currentTasks" :key="'sys-'+t.id" class="task-item" :class="{ done: t.status === 'done' }" @click.stop="onToggle(t)">
             <div class="cb-box" :class="{ checked: t.status === 'done' }">
               <svg v-if="t.status === 'done'" viewBox="0 0 24 24" width="14" height="14"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z" fill="#fff"/></svg>
             </div>
@@ -63,7 +63,7 @@
             <t-button variant="text" size="small" @click="showAddDialog = true">+ 添加</t-button>
           </template>
           <div v-if="!customList.length" style="text-align:center;padding:24px;color:#bbb">还没有自定义事项</div>
-          <div v-for="ct in customList" :key="ct.id" class="task-item" :class="{ done: ct.status === 'done' }" @click="onToggle(ct)">
+          <div v-for="ct in customList" :key="'cus-'+ct.id" class="task-item" :class="{ done: ct.status === 'done' }" @click.stop="onToggle(ct)">
             <div class="cb-box" :class="{ checked: ct.status === 'done' }">
               <svg v-if="ct.status === 'done'" viewBox="0 0 24 24" width="14" height="14"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z" fill="#fff"/></svg>
             </div>
@@ -85,25 +85,21 @@
 
       <!-- 右：图表 + 状态 -->
       <div class="col">
-        <!-- 绩效趋势 -->
         <t-card title="绩效趋势" :bordered="true" v-if="trendData.length">
           <div ref="chartRef" style="height:280px"></div>
         </t-card>
 
-        <!-- AI 洞察 -->
         <t-card title="AI 洞察" :bordered="true" style="margin-top:16px">
           <div v-if="dashboard.stateMachine" style="font-size:13px;line-height:1.8">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
               当前状态：<t-tag :theme="stateTheme" size="small">{{ dashboard.intern?.phase }}</t-tag>
               <span style="color:#0052D9;font-weight:500">{{ stateInsight }}</span>
             </div>
-
             <div v-if="dashboard.stateMachine.completed_events?.length" style="margin-top:8px">
               <div style="color:#86909c;font-size:12px;margin-bottom:4px">已完成里程碑</div>
               <t-tag v-for="e in dashboard.stateMachine.completed_events.slice(-3)" :key="e"
                 size="small" theme="success" variant="light" style="margin:2px">{{ e }}</t-tag>
             </div>
-
             <div v-if="dashboard.stateMachine.next_milestones?.length" style="margin-top:8px">
               <div style="color:#86909c;font-size:12px;margin-bottom:4px">下一目标</div>
               <div v-for="m in dashboard.stateMachine.next_milestones.slice(0,3)" :key="m.name"
@@ -125,7 +121,7 @@
       </t-form>
     </t-dialog>
 
-    <!-- Copilot 实时弹窗（白天轨响应） -->
+    <!-- Copilot 实时弹窗 -->
     <div v-if="copilotPopup.visible" class="copilot-overlay" @click.self="copilotPopup.visible = false">
       <div class="copilot-modal">
         <div class="copilot-header">
@@ -134,20 +130,12 @@
           <t-button theme="default" variant="text" size="small" @click="dismissCopilot" style="margin-left:auto">✕</t-button>
         </div>
         <div class="copilot-body">
-          <div class="copilot-alert">
-            {{ copilotPopup.message }}
-          </div>
-          <div v-if="copilotPopup.suggestion" class="copilot-suggestion">
-            {{ copilotPopup.suggestion }}
-          </div>
+          <div class="copilot-alert">{{ copilotPopup.message }}</div>
+          <div v-if="copilotPopup.suggestion" class="copilot-suggestion">{{ copilotPopup.suggestion }}</div>
         </div>
         <div class="copilot-actions">
-          <t-button theme="primary" size="small" @click="copilotAskMore">
-            问我具体问题
-          </t-button>
-          <t-button theme="default" variant="outline" size="small" @click="dismissCopilot">
-            稍后处理
-          </t-button>
+          <t-button theme="primary" size="small" @click="copilotAskMore">问我具体问题</t-button>
+          <t-button theme="default" variant="outline" size="small" @click="dismissCopilot">稍后处理</t-button>
         </div>
       </div>
     </div>
@@ -156,7 +144,7 @@
 
 <script setup>
 import { ref, computed, onMounted, watch, nextTick, onBeforeUnmount } from 'vue'
-import { Message } from 'tdesign-vue-next'
+import { MessagePlugin } from 'tdesign-vue-next'
 import { internApi } from '@/api'
 
 const dashboard = ref({})
@@ -173,13 +161,7 @@ const copilotQuestion = ref('')
 const copilotAnswer = ref('')
 const copilotLoading = ref(false)
 
-// Copilot 弹窗状态
-const copilotPopup = ref({
-  visible: false,
-  message: '',
-  suggestion: '',
-  eventId: null,
-})
+const copilotPopup = ref({ visible: false, message: '', suggestion: '', eventId: null })
 let copilotTimer = null
 
 // computed
@@ -217,18 +199,37 @@ async function loadInternList() {
 }
 function switchIntern(id) { loadData(id) }
 
+// ===== Toggle 逻辑（核心修复） =====
 async function onToggle(task) {
-  // 根据当前状态决定目标状态
-  const isDone = task.status === 'done'
-  const newStatus = isDone ? 'in_progress' : 'done'
+  // 阻止重复点击
+  if (task._toggling) return
+  task._toggling = true
+
   const oldStatus = task.status
+  const isDone = oldStatus === 'done'
+  const newStatus = isDone ? 'in_progress' : 'done'
+
+  // 乐观更新 UI（先改前端）
   task.status = newStatus
+
   try {
-    await internApi.toggleTask(task.id)
-    Message.success(isDone ? '已取消完成' : '已完成 ✓')
+    // type: 后端返回时已标注 'system' 或 'custom'
+    const taskType = task.type || 'system'
+    console.log(`[Toggle] id=${task.id}, type=${taskType}, ${oldStatus}→${newStatus}`)
+
+    const r = await internApi.toggleTask(task.id, taskType)
+    console.log('[Toggle] success:', r)
+
+    if (r && r.newStatus) {
+      task.status = r.newStatus
+    }
+    MessagePlugin.success(isDone ? '已取消完成' : '已完成 ✓')
   } catch (e) {
+    console.error('[Toggle] failed:', e)
     task.status = oldStatus
-    Message.error('操作失败，请重试')
+    MessagePlugin.error('操作失败：' + ((e.response && e.response.data && e.response.data.detail) || '请重试'))
+  } finally {
+    task._toggling = false
   }
 }
 
@@ -237,7 +238,7 @@ async function handleAddCustom() {
   await internApi.addCustomTask({ title: newTask.value.title, time: newTask.value.time })
   showAddDialog.value = false
   newTask.value = { title: '', time: '' }
-  Message.success('已添加')
+  MessagePlugin.success('已添加')
   loadData(selectedInternId.value)
 }
 
@@ -246,11 +247,11 @@ async function submitReverseConfirm() {
   try {
     const r = await internApi.submitReverseConfirm(selectedInternId.value, reverseConfirmText.value)
     if (r.passed) {
-      Message.success('Copilot：话术可信，阻断已解除')
+      MessagePlugin.success('Copilot：话术可信，阻断已解除')
       lastReverseConfirmAt.value = new Date().toLocaleString('zh-CN')
       reverseConfirmText.value = ''
-    } else Message.error(r.reason)
-  } catch (e) { Message.error('提交失败') }
+    } else MessagePlugin.error(r.reason)
+  } catch (e) { MessagePlugin.error('提交失败') }
 }
 
 async function askCopilot() {
@@ -274,7 +275,6 @@ function drawChart() {
     const d = trendData.value
     const jf = dashboard.value.intern?.jobFamily
     const weeks = d.map(x => x.week?.slice(5))
-
     let series = [], yAxis = []
     if (jf === 'RD') {
       series = [
@@ -290,7 +290,6 @@ function drawChart() {
       ]
       yAxis = [{ type: 'value' }, { type: 'value' }]
     }
-
     chartInstance.setOption({
       tooltip: { trigger: 'axis' },
       legend: { bottom: 0, textStyle: { fontSize: 11 } },
@@ -308,7 +307,6 @@ watch(trendData, () => nextTick(drawChart))
 onMounted(async () => {
   await loadInternList()
   if (selectedInternId.value) loadData(selectedInternId.value)
-  // 启动 Copilot 轮询（每 5 秒检查一次活跃崩溃事件）
   startCopilotPolling()
 })
 onBeforeUnmount(() => {
@@ -316,23 +314,15 @@ onBeforeUnmount(() => {
   stopCopilotPolling()
 })
 
-// ============================================================
-// Copilot 弹窗逻辑（白天轨实时响应）
-// ============================================================
-
+// Copilot 轮询
 function startCopilotPolling() {
   stopCopilotPolling()
-  checkCopilot()  // 立即检查一次
+  checkCopilot()
   copilotTimer = setInterval(checkCopilot, 5000)
 }
-
 function stopCopilotPolling() {
-  if (copilotTimer) {
-    clearInterval(copilotTimer)
-    copilotTimer = null
-  }
+  if (copilotTimer) { clearInterval(copilotTimer); copilotTimer = null }
 }
-
 async function checkCopilot() {
   if (!selectedInternId.value) return
   try {
@@ -347,25 +337,18 @@ async function checkCopilot() {
         eventId: event.id,
       }
     }
-  } catch (e) {
-    // 静默失败，不影响主流程
-  }
+  } catch (e) { /* silent */ }
 }
-
 function dismissCopilot() {
   copilotPopup.value.visible = false
   if (copilotPopup.value.eventId) {
-    internApi.dismissBreakdown(selectedInternId.value, copilotPopup.value.eventId)
-      .catch(() => {})
+    internApi.dismissBreakdown(selectedInternId.value, copilotPopup.value.eventId).catch(() => {})
   }
 }
-
 function copilotAskMore() {
   copilotPopup.value.visible = false
-  // 滚动到 Copilot 提问区域
   const el = document.querySelector('.col .t-card:nth-child(3)')
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  // 聚焦到提问输入框
   setTimeout(() => {
     const textarea = document.querySelector('.col .t-card:nth-child(3) textarea')
     if (textarea) textarea.focus()
@@ -391,7 +374,7 @@ function copilotAskMore() {
 .task-item {
   display: flex; align-items: center; gap: 10px;
   padding: 10px 0; border-bottom: 1px solid #f3f3f3;
-  cursor: pointer;
+  cursor: pointer; user-select: none;
   transition: background 0.15s;
 }
 .task-item:hover { background: #fafafa; margin: 0 -12px; padding: 10px 12px; border-radius: 6px; }
@@ -399,7 +382,6 @@ function copilotAskMore() {
 .task-item.done .task-title { text-decoration: line-through; color: #999; }
 .task-title { font-size: 14px; color: #1d2129; }
 
-/* 纯 div 勾选框 — 零依赖，100% 可靠 */
 .cb-box {
   width: 18px; height: 18px; min-width: 18px;
   border: 2px solid #c9cdd4; border-radius: 4px;
@@ -407,82 +389,38 @@ function copilotAskMore() {
   flex-shrink: 0; transition: all 0.15s ease;
 }
 .task-item:hover .cb-box { border-color: #0052D9; }
-.cb-box.checked {
-  background: #0052D9; border-color: #0052D9;
-}
+.cb-box.checked { background: #0052D9; border-color: #0052D9; }
 
 /* Copilot 弹窗 */
 .copilot-overlay {
-  position: fixed;
-  top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(0,0,0,0.45);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-  animation: fadeIn 0.2s ease;
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center;
+  z-index: 1000; animation: fadeIn 0.2s ease;
 }
-@keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 .copilot-modal {
-  background: #fff;
-  border-radius: 12px;
-  width: 480px;
-  max-width: 90vw;
-  box-shadow: 0 12px 48px rgba(0,0,0,0.25);
-  overflow: hidden;
+  background: #fff; border-radius: 12px; width: 480px; max-width: 90vw;
+  box-shadow: 0 12px 48px rgba(0,0,0,0.25); overflow: hidden;
   animation: slideUp 0.25s ease;
 }
-@keyframes slideUp {
-  from { transform: translateY(20px); opacity: 0; }
-  to { transform: translateY(0); opacity: 1; }
-}
+@keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 .copilot-header {
-  display: flex;
-  align-items: center;
-  padding: 16px 20px;
-  background: #f0f5ff;
-  border-bottom: 1px solid #d4e3ff;
-  gap: 8px;
+  display: flex; align-items: center; padding: 16px 20px;
+  background: #f0f5ff; border-bottom: 1px solid #d4e3ff; gap: 8px;
 }
-.copilot-icon {
-  font-size: 20px;
-}
-.copilot-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: #0052d9;
-}
-.copilot-body {
-  padding: 20px;
-}
+.copilot-icon { font-size: 20px; }
+.copilot-title { font-size: 15px; font-weight: 600; color: #0052d9; }
+.copilot-body { padding: 20px; }
 .copilot-alert {
-  background: #fff3e0;
-  border-left: 4px solid #ed7b2f;
-  padding: 12px 16px;
-  border-radius: 6px;
-  font-size: 14px;
-  line-height: 1.7;
-  color: #4a2600;
-  white-space: pre-wrap;
+  background: #fff3e0; border-left: 4px solid #ed7b2f;
+  padding: 12px 16px; border-radius: 6px; font-size: 14px; line-height: 1.7; color: #4a2600; white-space: pre-wrap;
 }
 .copilot-suggestion {
-  margin-top: 12px;
-  padding: 12px 16px;
-  background: #f6f8fa;
-  border-radius: 6px;
-  font-size: 13px;
-  line-height: 1.7;
-  color: #333;
+  margin-top: 12px; padding: 12px 16px; background: #f6f8fa;
+  border-radius: 6px; font-size: 13px; line-height: 1.7; color: #333;
 }
 .copilot-actions {
-  display: flex;
-  gap: 12px;
-  padding: 16px 20px;
-  background: #f9f9f9;
-  border-top: 1px solid #eee;
-  justify-content: flex-end;
+  display: flex; gap: 12px; padding: 16px 20px;
+  background: #f9f9f9; border-top: 1px solid #eee; justify-content: flex-end;
 }
 </style>
