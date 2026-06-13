@@ -1,0 +1,11 @@
+fastapi==0.110.0
+uvicorn==0.29.0
+sqlalchemy==2.0.29
+pymysql==1.1.0
+redis==5.0.3
+python-dotenv==1.0.1
+pydantic==2.6.4
+httpx==0.27.0
+sse-starlette==1.8.2
+tencentcloud-sdk-python-hunyuan==3.0.1250
+apscheduler==3.10.4
